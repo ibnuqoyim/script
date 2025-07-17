@@ -15,9 +15,7 @@ import (
 
 var imgRegex = regexp.MustCompile(`https://img-id\.gmbr\.pro/uploads/manga-images/.+/chapter-(\d+)/(\d+)\.jpg`)
 
-func fetchImages(url, outDir string, wg *sync.WaitGroup) ([]string, string, error) {
-	defer wg.Done()
-
+func fetchImages(url, outDir string) ([]string, string, error) {
 	resp, err := http.Get(url)
 	if err != nil {
 		return nil, "", err
@@ -31,7 +29,8 @@ func fetchImages(url, outDir string, wg *sync.WaitGroup) ([]string, string, erro
 
 	var downloaded []string
 	var chapter string
-	var imgWg sync.WaitGroup
+	var wg sync.WaitGroup
+	lock := &sync.Mutex{}
 
 	doc.Find("img").Each(func(i int, s *goquery.Selection) {
 		src, exists := s.Attr("src")
@@ -42,23 +41,26 @@ func fetchImages(url, outDir string, wg *sync.WaitGroup) ([]string, string, erro
 		match := imgRegex.FindStringSubmatch(src)
 		if len(match) == 3 {
 			chapter = match[1]
-			num := match[2]
-			filename := fmt.Sprintf("cha%s_%s.jpg", chapter, num)
+			imgNum := match[2]
+			imgNumPadded := fmt.Sprintf("%02s", imgNum)
+
+			filename := fmt.Sprintf("cha%s_%s.jpg", chapter, imgNumPadded)
 			imgPath := filepath.Join(outDir, filename)
 
-			imgWg.Add(1)
+			wg.Add(1)
 			go func(url, path string) {
-				defer imgWg.Done()
-				err := downloadFile(url, path)
-				if err == nil {
-					fmt.Println("✅ Downloaded:", path)
+				defer wg.Done()
+				if err := downloadFile(url, path); err == nil {
+					fmt.Println("✅", path)
+					lock.Lock()
 					downloaded = append(downloaded, path)
+					lock.Unlock()
 				}
 			}(src, imgPath)
 		}
 	})
 
-	imgWg.Wait()
+	wg.Wait()
 	return downloaded, chapter, nil
 }
 
@@ -125,36 +127,42 @@ func addFileToZip(zipWriter *zip.Writer, filename string) error {
 }
 
 func main() {
-	var url string
-	fmt.Print("Masukkan URL halaman komik: ")
-	fmt.Scan(&url)
+	var baseURL string
+	var startCh, endCh int
 
-	tmpDir := "images"
-	os.MkdirAll(tmpDir, 0755)
+	fmt.Print("Masukkan base URL (misal https://site.com/manga/chapter-): ")
+	fmt.Scan(&baseURL)
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	files, chapter, err := fetchImages(url, tmpDir, &wg)
-	wg.Wait()
+	fmt.Print("Mulai dari chapter: ")
+	fmt.Scan(&startCh)
 
-	if err != nil {
-		fmt.Println("❌ Gagal mengambil gambar:", err)
-		return
+	fmt.Print("Sampai chapter: ")
+	fmt.Scan(&endCh)
+
+	for ch := startCh; ch <= endCh; ch++ {
+		chapterURL := fmt.Sprintf("%schapter-%d", baseURL, ch)
+		fmt.Println("🔎 Memproses:", chapterURL)
+
+		tmpDir := fmt.Sprintf("images_ch%d", ch)
+		os.MkdirAll(tmpDir, 0755)
+
+		files, chapterStr, err := fetchImages(chapterURL, tmpDir)
+		if err != nil {
+			fmt.Println("❌ Gagal:", err)
+			continue
+		}
+		if len(files) == 0 {
+			fmt.Println("⚠️  Tidak ada gambar ditemukan.")
+			continue
+		}
+
+		zipName := fmt.Sprintf("chapter-%s.zip", chapterStr)
+		err = zipFiles(files, zipName)
+		if err != nil {
+			fmt.Println("❌ Gagal zip:", err)
+			continue
+		}
+
+		fmt.Printf("✅ Chapter %s selesai → %s\n", chapterStr, zipName)
 	}
-
-	if len(files) == 0 {
-		fmt.Println("⚠️ Tidak ada gambar ditemukan.")
-		return
-	}
-
-	zipName := fmt.Sprintf("chapter-%s.zip", chapter)
-	zipPath := filepath.Join(".", zipName)
-
-	err = zipFiles(files, zipPath)
-	if err != nil {
-		fmt.Println("❌ Gagal membuat zip:", err)
-		return
-	}
-
-	fmt.Printf("✅ ZIP berhasil dibuat: %s\n", zipPath)
 }
